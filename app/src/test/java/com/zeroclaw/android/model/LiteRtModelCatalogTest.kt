@@ -51,7 +51,7 @@ class LiteRtModelCatalogTest {
         assertEquals("gemma-4-e2b-it", e2b.id)
         assertEquals(LiteRtRisk.Comfortable, e2b.risk)
         assertEquals(2_588_147_712L, e2b.fileBytes)
-        assertEquals(32_000, e2b.contextTokens)
+        assertEquals(4096, e2b.contextTokens)
     }
 
     @Test
@@ -60,7 +60,7 @@ class LiteRtModelCatalogTest {
         assertEquals("gemma-4-e4b-it", e4b.id)
         assertEquals(LiteRtRisk.Heavy, e4b.risk)
         assertEquals(3_659_530_240L, e4b.fileBytes)
-        assertEquals(24_000, e4b.contextTokens)
+        assertEquals(4096, e4b.contextTokens)
         assertTrue(e4b.contextTokens < 32_000, "E4B context must be capped below native 32K")
     }
 

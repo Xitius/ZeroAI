@@ -718,11 +718,11 @@ impl FamilyProviderFactory for OpenAIModelProviderConfig {
     }
 }
 
-fn normalize_ollama_compat_base_url(api_url: Option<&str>) -> String {
+fn normalize_compat_base_url(api_url: Option<&str>, default_url: &str) -> String {
     let raw = api_url
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or("http://localhost:11434/v1");
+        .unwrap_or(default_url);
 
     let Ok(mut url) = reqwest::Url::parse(raw) else {
         return raw.trim_end_matches('/').to_string();
@@ -743,7 +743,7 @@ fn build_ollama_compat_provider(
     api_url: Option<&str>,
     opts: &ModelProviderRuntimeOptions,
 ) -> OpenAiCompatibleModelProvider {
-    let base_url = normalize_ollama_compat_base_url(api_url);
+    let base_url = normalize_compat_base_url(api_url, "http://localhost:11434/v1");
     let ollama_key = key.map(str::trim).filter(|value| !value.is_empty());
     let mut p = OpenAiCompatibleModelProvider::new_with_vision(
         alias,
@@ -1051,6 +1051,7 @@ impl FamilyProviderFactory for LmstudioModelProviderConfig {
         api_url: Option<&str>,
         opts: &ModelProviderRuntimeOptions,
     ) -> Result<Box<dyn ModelProvider>> {
+        let base_url = normalize_compat_base_url(api_url, "http://localhost:1234/v1");
         let lm_studio_key = key
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -1058,7 +1059,7 @@ impl FamilyProviderFactory for LmstudioModelProviderConfig {
         let p = OpenAiCompatibleModelProvider::new(
             alias,
             "LM Studio",
-            api_url.unwrap_or("http://localhost:1234/v1"),
+            &base_url,
             Some(lm_studio_key),
             AuthStyle::Bearer,
         );
@@ -1074,7 +1075,7 @@ impl FamilyProviderFactory for LlamacppModelProviderConfig {
         api_url: Option<&str>,
         opts: &ModelProviderRuntimeOptions,
     ) -> Result<Box<dyn ModelProvider>> {
-        let base_url = api_url.unwrap_or("http://localhost:8080/v1");
+        let base_url = normalize_compat_base_url(api_url, "http://localhost:8080/v1");
         let llama_cpp_key = key
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -1082,7 +1083,7 @@ impl FamilyProviderFactory for LlamacppModelProviderConfig {
         let mut p = OpenAiCompatibleModelProvider::new_with_vision(
             alias,
             "llama.cpp",
-            base_url,
+            &base_url,
             Some(llama_cpp_key),
             AuthStyle::Bearer,
             true,
@@ -1142,7 +1143,7 @@ impl FamilyProviderFactory for CustomModelProviderConfig {
         api_url: Option<&str>,
         opts: &ModelProviderRuntimeOptions,
     ) -> Result<Box<dyn ModelProvider>> {
-        let base_url = api_url.ok_or_else(|| {
+        let raw_url = api_url.ok_or_else(|| {
             ::zeroclaw_log::record!(
                 ERROR,
                 ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Reject)
@@ -1159,10 +1160,11 @@ impl FamilyProviderFactory for CustomModelProviderConfig {
                  `[model_providers.custom.<alias>] uri = \"https://your-api.com\"` in config.toml.",
             )
         })?;
+        let base_url = normalize_compat_base_url(Some(raw_url), raw_url);
         let mut p = OpenAiCompatibleModelProvider::new_with_vision(
             alias,
             "Custom",
-            base_url,
+            &base_url,
             key,
             AuthStyle::Bearer,
             true,
@@ -1177,6 +1179,30 @@ impl FamilyProviderFactory for CustomModelProviderConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_compat_base_url_appends_v1_for_bare_host() {
+        assert_eq!(
+            normalize_compat_base_url(Some("http://192.168.1.100:8080"), "http://localhost:8080/v1"),
+            "http://192.168.1.100:8080/v1"
+        );
+        assert_eq!(
+            normalize_compat_base_url(Some("http://192.168.1.100:8080/"), "http://localhost:8080/v1"),
+            "http://192.168.1.100:8080/v1"
+        );
+    }
+
+    #[test]
+    fn normalize_compat_base_url_preserves_existing_v1() {
+        assert_eq!(
+            normalize_compat_base_url(Some("http://192.168.1.100:8080/v1"), "http://localhost:8080/v1"),
+            "http://192.168.1.100:8080/v1"
+        );
+        assert_eq!(
+            normalize_compat_base_url(Some("http://192.168.1.100:8080/v1/"), "http://localhost:8080/v1"),
+            "http://192.168.1.100:8080/v1"
+        );
+    }
 
     #[test]
     fn ollama_factory_uses_no_credential_when_key_absent() {
