@@ -1202,6 +1202,10 @@ mod tests {
             normalize_compat_base_url(Some("http://192.168.1.100:8080/v1/"), "http://localhost:8080/v1"),
             "http://192.168.1.100:8080/v1"
         );
+        assert_eq!(
+            normalize_compat_base_url(Some("http://192.168.1.100:8080/v1/v1"), "http://localhost:8080/v1"),
+            "http://192.168.1.100:8080/v1/v1"
+        );
     }
 
     #[test]
@@ -1240,6 +1244,15 @@ mod tests {
         );
 
         assert_eq!(provider.base_url, "https://ollama.com/v1");
+
+        let provider_chat = build_ollama_compat_provider(
+            "default",
+            None,
+            Some("https://ollama.com/api/chat"),
+            &ModelProviderRuntimeOptions::default(),
+        );
+
+        assert_eq!(provider_chat.base_url, "https://ollama.com/v1");
     }
 
     #[test]
