@@ -268,7 +268,7 @@ impl OpenAiCompatibleModelProvider {
         Self {
             alias: alias.to_string(),
             name: name.to_string(),
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url: base_url.to_string(),
             credential: credential.map(ToString::to_string),
             auth_header: auth_style,
             supports_vision,
@@ -546,32 +546,45 @@ impl OpenAiCompatibleModelProvider {
     }
 
     /// Build the full URL for chat completions, detecting if base_url already includes the path.
-    /// This allows custom model_providers with non-standard endpoints (e.g., VolcEngine ARK uses
-    /// `/api/coding/v3/chat/completions` instead of `/v1/chat/completions`).
+    /// Uses structural reqwest::Url path operations to preserve query parameters, fragments,
+    /// and host/port components while preventing path duplication or query syntax corruption.
     fn chat_completions_url(&self) -> String {
-        // If a custom api_path is configured, use it directly.
+        let Ok(mut url) = reqwest::Url::parse(&self.base_url) else {
+            // Textual fallback for invalid/non-parseable base URLs
+            if let Some(ref api_path) = self.api_path {
+                let separator = if api_path.starts_with('/') { "" } else { "/" };
+                return format!("{}{separator}{api_path}", self.base_url);
+            }
+            if self.base_url.trim_end_matches('/').ends_with("/chat/completions") {
+                return self.base_url.clone();
+            }
+            return format!("{}/chat/completions", self.base_url);
+        };
+
         if let Some(ref api_path) = self.api_path {
-            let separator = if api_path.starts_with('/') { "" } else { "/" };
-            return format!("{}{separator}{api_path}", self.base_url);
+            let current_path = url.path().trim_end_matches('/');
+            let target_path = if api_path.starts_with('/') {
+                api_path.clone()
+            } else if current_path.is_empty() || current_path == "/" {
+                format!("/{api_path}")
+            } else {
+                format!("{current_path}/{api_path}")
+            };
+            url.set_path(&target_path);
+            return url.to_string();
         }
 
-        let has_full_endpoint = reqwest::Url::parse(&self.base_url)
-            .map(|url| {
-                url.path()
-                    .trim_end_matches('/')
-                    .ends_with("/chat/completions")
-            })
-            .unwrap_or_else(|_| {
-                self.base_url
-                    .trim_end_matches('/')
-                    .ends_with("/chat/completions")
-            });
-
-        if has_full_endpoint {
-            self.base_url.clone()
-        } else {
-            format!("{}/chat/completions", self.base_url)
+        let current_path = url.path().trim_end_matches('/');
+        if !current_path.ends_with("/chat/completions") {
+            let target_path = if current_path.is_empty() || current_path == "/" {
+                "/chat/completions".to_string()
+            } else {
+                format!("{current_path}/chat/completions")
+            };
+            url.set_path(&target_path);
         }
+
+        url.to_string()
     }
 
     fn requires_tool_stream(&self) -> bool {
@@ -2925,9 +2938,9 @@ mod tests {
     }
 
     #[test]
-    fn strips_trailing_slash() {
+    fn preserves_raw_base_url() {
         let p = make_model_provider("test", "https://example.com/", None);
-        assert_eq!(p.base_url, "https://example.com");
+        assert_eq!(p.base_url, "https://example.com/");
     }
 
     #[tokio::test]
@@ -3269,6 +3282,40 @@ mod tests {
         assert_eq!(
             p.chat_completions_url(),
             "https://api.example.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn chat_completions_url_structural_query_and_fragment_preservation() {
+        let p1 = make_model_provider("test", "https://host/v1?token=abc/", None);
+        assert_eq!(
+            p1.chat_completions_url(),
+            "https://host/v1/chat/completions?token=abc/"
+        );
+
+        let p2 = make_model_provider("test", "https://host/v1?token=abc/#frag/", None);
+        assert_eq!(
+            p2.chat_completions_url(),
+            "https://host/v1/chat/completions?token=abc/#frag/"
+        );
+
+        let p3 = make_model_provider("test", "https://host/proxy/api?token=abc/", None);
+        assert_eq!(
+            p3.chat_completions_url(),
+            "https://host/proxy/api/chat/completions?token=abc/"
+        );
+
+        let p4 = make_model_provider("test", "https://host/v1/chat/completions?token=abc/", None);
+        assert_eq!(
+            p4.chat_completions_url(),
+            "https://host/v1/chat/completions?token=abc/"
+        );
+
+        let p5 = make_model_provider("test", "https://host/v1?token=abc/#frag/", None)
+            .with_api_path(Some("/custom/completions".to_string()));
+        assert_eq!(
+            p5.chat_completions_url(),
+            "https://host/custom/completions?token=abc/#frag/"
         );
     }
 

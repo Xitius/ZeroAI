@@ -14,6 +14,7 @@ fn load_openclaw_bootstrap_files(
     prompt: &mut String,
     workspace_dir: &std::path::Path,
     max_chars_per_file: usize,
+    include_memory: bool,
 ) {
     prompt.push_str(
         "The following workspace files define your identity, behavior, and context. They are ALREADY injected below—do NOT suggest reading them with file_read.\n\n",
@@ -31,8 +32,10 @@ fn load_openclaw_bootstrap_files(
         inject_workspace_file(prompt, workspace_dir, "BOOTSTRAP.md", max_chars_per_file);
     }
 
-    // MEMORY.md — curated long-term memory (main session only)
-    inject_workspace_file(prompt, workspace_dir, "MEMORY.md", max_chars_per_file);
+    // MEMORY.md — curated long-term memory (authorized private/direct session only)
+    if include_memory {
+        inject_workspace_file(prompt, workspace_dir, "MEMORY.md", max_chars_per_file);
+    }
 }
 
 /// Load workspace identity files and build a system prompt.
@@ -103,6 +106,37 @@ pub fn build_system_prompt_with_mode(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub fn build_system_prompt_with_mode_autonomy_and_memory(
+    workspace_dir: &std::path::Path,
+    model_name: &str,
+    tools: &[(&str, &str)],
+    skills: &[Skill],
+    identity_config: Option<&zeroclaw_config::schema::IdentityConfig>,
+    bootstrap_max_chars: Option<usize>,
+    autonomy_config: Option<&zeroclaw_config::schema::RiskProfileConfig>,
+    native_tools: bool,
+    skills_prompt_mode: zeroclaw_config::schema::SkillsPromptInjectionMode,
+    compact_context: bool,
+    max_system_prompt_chars: usize,
+    include_memory: bool,
+) -> String {
+    build_system_prompt_internal(
+        workspace_dir,
+        model_name,
+        tools,
+        skills,
+        identity_config,
+        bootstrap_max_chars,
+        autonomy_config,
+        native_tools,
+        skills_prompt_mode,
+        compact_context,
+        max_system_prompt_chars,
+        include_memory,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn build_system_prompt_with_mode_and_autonomy(
     workspace_dir: &std::path::Path,
     model_name: &str,
@@ -115,6 +149,37 @@ pub fn build_system_prompt_with_mode_and_autonomy(
     skills_prompt_mode: zeroclaw_config::schema::SkillsPromptInjectionMode,
     compact_context: bool,
     max_system_prompt_chars: usize,
+) -> String {
+    build_system_prompt_internal(
+        workspace_dir,
+        model_name,
+        tools,
+        skills,
+        identity_config,
+        bootstrap_max_chars,
+        autonomy_config,
+        native_tools,
+        skills_prompt_mode,
+        compact_context,
+        max_system_prompt_chars,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_system_prompt_internal(
+    workspace_dir: &std::path::Path,
+    model_name: &str,
+    tools: &[(&str, &str)],
+    skills: &[Skill],
+    identity_config: Option<&zeroclaw_config::schema::IdentityConfig>,
+    bootstrap_max_chars: Option<usize>,
+    autonomy_config: Option<&zeroclaw_config::schema::RiskProfileConfig>,
+    native_tools: bool,
+    skills_prompt_mode: zeroclaw_config::schema::SkillsPromptInjectionMode,
+    compact_context: bool,
+    max_system_prompt_chars: usize,
+    include_memory: bool,
 ) -> String {
     use std::fmt::Write;
     let mut prompt = String::with_capacity(8192);
@@ -269,7 +334,7 @@ pub fn build_system_prompt_with_mode_and_autonomy(
                     // No AIEOS identity loaded (shouldn't happen if is_aieos_configured returned true)
                     // Fall back to OpenClaw bootstrap files
                     let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
-                    load_openclaw_bootstrap_files(&mut prompt, workspace_dir, max_chars);
+                    load_openclaw_bootstrap_files(&mut prompt, workspace_dir, max_chars, include_memory);
                 }
                 Err(e) => {
                     // Log error but don't fail - fall back to OpenClaw
@@ -277,18 +342,18 @@ pub fn build_system_prompt_with_mode_and_autonomy(
                         "Warning: Failed to load AIEOS identity: {e}. Using OpenClaw format."
                     );
                     let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
-                    load_openclaw_bootstrap_files(&mut prompt, workspace_dir, max_chars);
+                    load_openclaw_bootstrap_files(&mut prompt, workspace_dir, max_chars, include_memory);
                 }
             }
         } else {
             // OpenClaw format
             let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
-            load_openclaw_bootstrap_files(&mut prompt, workspace_dir, max_chars);
+            load_openclaw_bootstrap_files(&mut prompt, workspace_dir, max_chars, include_memory);
         }
     } else {
         // No identity config - use OpenClaw format
         let max_chars = bootstrap_max_chars.unwrap_or(BOOTSTRAP_MAX_CHARS);
-        load_openclaw_bootstrap_files(&mut prompt, workspace_dir, max_chars);
+        load_openclaw_bootstrap_files(&mut prompt, workspace_dir, max_chars, include_memory);
     }
 
     // ── 6. Date & Time ──────────────────────────────────────────

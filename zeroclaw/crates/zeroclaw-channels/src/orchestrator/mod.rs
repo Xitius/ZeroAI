@@ -2145,6 +2145,23 @@ fn is_group_reply_target(reply_target: &str) -> bool {
     reply_target.contains("@g.us") || reply_target.starts_with("group:")
 }
 
+fn strip_memory_md_section(prompt: &str) -> String {
+    let Some(start) = prompt.find("### MEMORY.md") else {
+        return prompt.to_string();
+    };
+
+    let rest = &prompt[start..];
+    let next_section = rest[14..]
+        .find("\n### ")
+        .map(|idx| start + 14 + idx)
+        .unwrap_or(prompt.len());
+
+    let mut cleaned = String::with_capacity(prompt.len());
+    cleaned.push_str(&prompt[..start]);
+    cleaned.push_str(&prompt[next_section..]);
+    cleaned
+}
+
 fn sender_memory_session_ids(
     msg: &zeroclaw_api::channel::ChannelMessage,
     history_key: &str,
@@ -3492,7 +3509,7 @@ async fn process_channel_message_body(
             ctx.min_relevance_score,
             Some(&history_key),
         );
-        tokio::join!(sender_memory_fut, group_memory_fut)
+        (String::new(), group_memory_fut.await)
     } else {
         (sender_memory_fut.await, String::new())
     };
@@ -3501,7 +3518,9 @@ async fn process_channel_message_body(
     ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"mem_recall_ms": mem_recall_ms, "sender_empty": sender_memory.is_empty(), "group_empty": group_memory.is_empty()})), "memory recall completed");
 
     // Merge sender and group memory context blocks.
-    let memory_context = if group_memory.is_empty() {
+    let memory_context = if is_group_chat {
+        group_memory
+    } else if group_memory.is_empty() {
         sender_memory
     } else if sender_memory.is_empty() {
         group_memory
@@ -3512,10 +3531,16 @@ async fn process_channel_message_body(
     // Use refreshed system prompt for new sessions (master's /new support),
     // and inject memory into system prompt (not user message) so it
     // doesn't pollute session history and is re-fetched each turn.
-    let base_system_prompt = if had_prior_history {
+    // For group chats, strip private long-term MEMORY.md if present in the base system prompt.
+    let raw_base_system_prompt = if had_prior_history {
         ctx.system_prompt.as_str().to_string()
     } else {
         refreshed_new_session_system_prompt(ctx.as_ref())
+    };
+    let base_system_prompt = if is_group_chat {
+        strip_memory_md_section(&raw_base_system_prompt)
+    } else {
+        raw_base_system_prompt
     };
     let mut system_prompt =
         build_channel_system_prompt_for_message(&base_system_prompt, &msg, target_channel.as_ref());
@@ -13513,6 +13538,17 @@ BTC is currently around $65,000 based on latest tool output."#
 
         let recalled = mem.recall("45", 5, None, None, None).await.unwrap();
         assert!(recalled.iter().any(|entry| entry.content.contains("45")));
+    }
+
+    #[tokio::test]
+    async fn group_chat_excludes_private_memory_md_and_sender_memory() {
+        let raw_prompt = "Header\n### MEMORY.md\nSecret long term memory\n### USER.md\nUser info";
+        let cleaned = strip_memory_md_section(raw_prompt);
+        assert!(!cleaned.contains("Secret long term memory"));
+        assert!(!cleaned.contains("MEMORY.md"));
+        assert!(cleaned.contains("Header"));
+        assert!(cleaned.contains("### USER.md"));
+        assert!(cleaned.contains("User info"));
     }
 
     #[tokio::test]
