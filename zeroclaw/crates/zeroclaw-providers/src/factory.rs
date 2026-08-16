@@ -725,16 +725,17 @@ fn normalize_compat_base_url(api_url: Option<&str>, default_url: &str) -> String
         .unwrap_or(default_url);
 
     let Ok(mut url) = reqwest::Url::parse(raw) else {
-        return raw.trim_end_matches('/').to_string();
+        return raw.to_string();
     };
 
-    let path = url.path().trim_end_matches('/');
-    if path.is_empty() || path == "/" {
+    let path = url.path().trim_end_matches('/').to_string();
+    if path.is_empty() {
         url.set_path("/v1");
-        return url.to_string().trim_end_matches('/').to_string();
+    } else {
+        url.set_path(&path);
     }
 
-    raw.trim_end_matches('/').to_string()
+    url.to_string()
 }
 
 fn normalize_ollama_compat_base_url(api_url: Option<&str>) -> String {
@@ -744,16 +745,17 @@ fn normalize_ollama_compat_base_url(api_url: Option<&str>) -> String {
         .unwrap_or("http://localhost:11434/v1");
 
     let Ok(mut url) = reqwest::Url::parse(raw) else {
-        return raw.trim_end_matches('/').to_string();
+        return raw.to_string();
     };
 
-    let path = url.path().trim_end_matches('/');
-    if path.is_empty() || matches!(path, "/" | "/api" | "/api/chat") {
+    let path = url.path().trim_end_matches('/').to_string();
+    if path.is_empty() || matches!(path.as_str(), "/api" | "/api/chat") {
         url.set_path("/v1");
-        return url.to_string().trim_end_matches('/').to_string();
+    } else {
+        url.set_path(&path);
     }
 
-    raw.trim_end_matches('/').to_string()
+    url.to_string()
 }
 
 fn build_ollama_compat_provider(
@@ -1244,6 +1246,38 @@ mod tests {
         assert_eq!(
             normalize_compat_base_url(Some("http://192.168.1.100:8080/v1/v1"), "http://localhost:8080/v1"),
             "http://192.168.1.100:8080/v1/v1"
+        );
+    }
+
+    #[test]
+    fn normalize_compat_base_url_preserves_query_values_and_fragments() {
+        assert_eq!(
+            normalize_compat_base_url(Some("https://host/?token=abc/"), "http://localhost:8080/v1"),
+            "https://host/v1?token=abc/"
+        );
+        assert_eq!(
+            normalize_compat_base_url(Some("https://host/api/?token=abc/"), "http://localhost:8080/v1"),
+            "https://host/api?token=abc/"
+        );
+        assert_eq!(
+            normalize_compat_base_url(Some("https://host/proxy/api/?token=abc/"), "http://localhost:8080/v1"),
+            "https://host/proxy/api?token=abc/"
+        );
+        assert_eq!(
+            normalize_compat_base_url(Some("https://host/v1/?token=abc/#section1/"), "http://localhost:8080/v1"),
+            "https://host/v1?token=abc/#section1/"
+        );
+    }
+
+    #[test]
+    fn normalize_ollama_compat_base_url_preserves_query_values_and_fragments() {
+        assert_eq!(
+            normalize_ollama_compat_base_url(Some("https://host/api/?token=abc/")),
+            "https://host/v1?token=abc/"
+        );
+        assert_eq!(
+            normalize_ollama_compat_base_url(Some("https://host/api/chat/?token=abc/#section2/")),
+            "https://host/v1?token=abc/#section2/"
         );
     }
 
