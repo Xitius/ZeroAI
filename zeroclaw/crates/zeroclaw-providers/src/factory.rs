@@ -729,6 +729,25 @@ fn normalize_compat_base_url(api_url: Option<&str>, default_url: &str) -> String
     };
 
     let path = url.path().trim_end_matches('/');
+    if path.is_empty() || path == "/" {
+        url.set_path("/v1");
+        return url.to_string().trim_end_matches('/').to_string();
+    }
+
+    raw.trim_end_matches('/').to_string()
+}
+
+fn normalize_ollama_compat_base_url(api_url: Option<&str>) -> String {
+    let raw = api_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("http://localhost:11434/v1");
+
+    let Ok(mut url) = reqwest::Url::parse(raw) else {
+        return raw.trim_end_matches('/').to_string();
+    };
+
+    let path = url.path().trim_end_matches('/');
     if path.is_empty() || matches!(path, "/" | "/api" | "/api/chat") {
         url.set_path("/v1");
         return url.to_string().trim_end_matches('/').to_string();
@@ -743,7 +762,7 @@ fn build_ollama_compat_provider(
     api_url: Option<&str>,
     opts: &ModelProviderRuntimeOptions,
 ) -> OpenAiCompatibleModelProvider {
-    let base_url = normalize_compat_base_url(api_url, "http://localhost:11434/v1");
+    let base_url = normalize_ollama_compat_base_url(api_url);
     let ollama_key = key.map(str::trim).filter(|value| !value.is_empty());
     let mut p = OpenAiCompatibleModelProvider::new_with_vision(
         alias,
@@ -1189,6 +1208,26 @@ mod tests {
         assert_eq!(
             normalize_compat_base_url(Some("http://192.168.1.100:8080/"), "http://localhost:8080/v1"),
             "http://192.168.1.100:8080/v1"
+        );
+    }
+
+    #[test]
+    fn normalize_compat_base_url_preserves_non_root_paths() {
+        assert_eq!(
+            normalize_compat_base_url(Some("http://192.168.1.100:8080/api"), "http://localhost:8080/v1"),
+            "http://192.168.1.100:8080/api"
+        );
+        assert_eq!(
+            normalize_compat_base_url(Some("http://192.168.1.100:8080/api/chat"), "http://localhost:8080/v1"),
+            "http://192.168.1.100:8080/api/chat"
+        );
+        assert_eq!(
+            normalize_compat_base_url(Some("http://192.168.1.100:8080/proxy/api"), "http://localhost:8080/v1"),
+            "http://192.168.1.100:8080/proxy/api"
+        );
+        assert_eq!(
+            normalize_compat_base_url(Some("http://192.168.1.100:8080/custom/base"), "http://localhost:8080/v1"),
+            "http://192.168.1.100:8080/custom/base"
         );
     }
 
