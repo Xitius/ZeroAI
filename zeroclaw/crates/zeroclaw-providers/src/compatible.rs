@@ -563,12 +563,11 @@ impl OpenAiCompatibleModelProvider {
 
         if let Some(ref api_path) = self.api_path {
             let current_path = url.path().trim_end_matches('/');
-            let target_path = if api_path.starts_with('/') {
-                api_path.clone()
-            } else if current_path.is_empty() || current_path == "/" {
-                format!("/{api_path}")
+            let trimmed_api_path = api_path.trim_start_matches('/');
+            let target_path = if current_path.is_empty() || current_path == "/" {
+                format!("/{trimmed_api_path}")
             } else {
-                format!("{current_path}/{api_path}")
+                format!("{current_path}/{trimmed_api_path}")
             };
             url.set_path(&target_path);
             return url.to_string();
@@ -3315,7 +3314,14 @@ mod tests {
             .with_api_path(Some("/custom/completions".to_string()));
         assert_eq!(
             p5.chat_completions_url(),
-            "https://host/custom/completions?token=abc/#frag/"
+            "https://host/v1/custom/completions?token=abc/#frag/"
+        );
+
+        let p6 = make_model_provider("test", "https://host/proxy/v1?token=abc/", None)
+            .with_api_path(Some("/custom/completions".to_string()));
+        assert_eq!(
+            p6.chat_completions_url(),
+            "https://host/proxy/v1/custom/completions?token=abc/"
         );
     }
 

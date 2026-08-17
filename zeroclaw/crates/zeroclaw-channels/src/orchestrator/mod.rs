@@ -1257,6 +1257,55 @@ fn replace_available_skills_section(base_prompt: &str, refreshed_skills: &str) -
 }
 
 fn refreshed_new_session_system_prompt(ctx: &ChannelRuntimeContext) -> String {
+    refreshed_new_session_system_prompt_for_scope(ctx, true)
+}
+
+fn refreshed_new_session_system_prompt_for_scope(
+    ctx: &ChannelRuntimeContext,
+    include_memory: bool,
+) -> String {
+    let base_prompt = if include_memory {
+        ctx.system_prompt.as_str().to_string()
+    } else {
+        // Re-render system prompt from workspace files without MEMORY.md
+        let skills = zeroclaw_runtime::skills::load_skills_for_agent(
+            ctx.workspace_dir.as_ref(),
+            ctx.prompt_config.as_ref(),
+            ctx.agent_alias.as_str(),
+        );
+        let tool_specs: Vec<(&str, &str)> = ctx
+            .tools_registry
+            .iter()
+            .map(|t| (t.name(), t.description()))
+            .collect();
+        let risk_profile = ctx
+            .prompt_config
+            .risk_profile_for_agent(ctx.agent_alias.as_str())
+            .cloned()
+            .unwrap_or_default();
+        let native_tools = ctx.model_provider.supports_native_tools();
+        let bootstrap_max_chars = if ctx.agent_cfg.compact_context {
+            Some(6000)
+        } else {
+            None
+        };
+
+        zeroclaw_runtime::agent::system_prompt::build_system_prompt_with_mode_autonomy_and_memory(
+            ctx.workspace_dir.as_ref(),
+            ctx.model.as_str(),
+            &tool_specs,
+            &skills,
+            Some(&ctx.agent_cfg.identity),
+            bootstrap_max_chars,
+            Some(&risk_profile),
+            native_tools,
+            ctx.prompt_config.skills.prompt_injection_mode,
+            ctx.agent_cfg.compact_context,
+            ctx.agent_cfg.max_system_prompt_chars,
+            false,
+        )
+    };
+
     let refreshed_skills = zeroclaw_runtime::skills::skills_to_prompt_with_mode(
         &zeroclaw_runtime::skills::load_skills_with_config(
             ctx.workspace_dir.as_ref(),
@@ -1265,7 +1314,7 @@ fn refreshed_new_session_system_prompt(ctx: &ChannelRuntimeContext) -> String {
         ctx.workspace_dir.as_ref(),
         ctx.prompt_config.skills.prompt_injection_mode,
     );
-    replace_available_skills_section(ctx.system_prompt.as_str(), &refreshed_skills)
+    replace_available_skills_section(&base_prompt, &refreshed_skills)
 }
 
 fn compact_sender_history(ctx: &ChannelRuntimeContext, sender_key: &str) -> bool {
@@ -2143,23 +2192,6 @@ fn format_memory_context(
 
 fn is_group_reply_target(reply_target: &str) -> bool {
     reply_target.contains("@g.us") || reply_target.starts_with("group:")
-}
-
-fn strip_memory_md_section(prompt: &str) -> String {
-    let Some(start) = prompt.find("### MEMORY.md") else {
-        return prompt.to_string();
-    };
-
-    let rest = &prompt[start..];
-    let next_section = rest[14..]
-        .find("\n### ")
-        .map(|idx| start + 14 + idx)
-        .unwrap_or(prompt.len());
-
-    let mut cleaned = String::with_capacity(prompt.len());
-    cleaned.push_str(&prompt[..start]);
-    cleaned.push_str(&prompt[next_section..]);
-    cleaned
 }
 
 fn sender_memory_session_ids(
@@ -3531,16 +3563,13 @@ async fn process_channel_message_body(
     // Use refreshed system prompt for new sessions (master's /new support),
     // and inject memory into system prompt (not user message) so it
     // doesn't pollute session history and is re-fetched each turn.
-    // For group chats, strip private long-term MEMORY.md if present in the base system prompt.
-    let raw_base_system_prompt = if had_prior_history {
+    // For group chats, ensure private long-term MEMORY.md is omitted at construction time.
+    let base_system_prompt = if is_group_chat {
+        refreshed_new_session_system_prompt_for_scope(ctx.as_ref(), false)
+    } else if had_prior_history {
         ctx.system_prompt.as_str().to_string()
     } else {
-        refreshed_new_session_system_prompt(ctx.as_ref())
-    };
-    let base_system_prompt = if is_group_chat {
-        strip_memory_md_section(&raw_base_system_prompt)
-    } else {
-        raw_base_system_prompt
+        refreshed_new_session_system_prompt_for_scope(ctx.as_ref(), true)
     };
     let mut system_prompt =
         build_channel_system_prompt_for_message(&base_system_prompt, &msg, target_channel.as_ref());
@@ -13542,13 +13571,60 @@ BTC is currently around $65,000 based on latest tool output."#
 
     #[tokio::test]
     async fn group_chat_excludes_private_memory_md_and_sender_memory() {
-        let raw_prompt = "Header\n### MEMORY.md\nSecret long term memory\n### USER.md\nUser info";
-        let cleaned = strip_memory_md_section(raw_prompt);
-        assert!(!cleaned.contains("Secret long term memory"));
-        assert!(!cleaned.contains("MEMORY.md"));
-        assert!(cleaned.contains("Header"));
-        assert!(cleaned.contains("### USER.md"));
-        assert!(cleaned.contains("User info"));
+        let tmp = TempDir::new().unwrap();
+        let ws = tmp.path().join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("AGENTS.md"), "# Agents\nAGENTS_SENTINEL").unwrap();
+        std::fs::write(ws.join("SOUL.md"), "# Soul\nSOUL_SENTINEL").unwrap();
+        std::fs::write(ws.join("USER.md"), "# User\nUSER_SENTINEL").unwrap();
+        std::fs::write(
+            ws.join("MEMORY.md"),
+            "# Memory\nPRIVATE_MEMORY_SENTINEL_123\n### Projects\nPRIVATE_PROJECT_SENTINEL_456\n### Preferences\nPRIVATE_PREF_SENTINEL_789",
+        )
+        .unwrap();
+
+        let direct_prompt = zeroclaw_runtime::agent::system_prompt::build_system_prompt_with_mode_autonomy_and_memory(
+            &ws,
+            "test-model",
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            false,
+            zeroclaw_config::schema::SkillsPromptInjectionMode::Full,
+            false,
+            0,
+            true,
+        );
+
+        assert!(direct_prompt.contains("PRIVATE_MEMORY_SENTINEL_123"));
+        assert!(direct_prompt.contains("PRIVATE_PROJECT_SENTINEL_456"));
+        assert!(direct_prompt.contains("PRIVATE_PREF_SENTINEL_789"));
+        assert!(direct_prompt.contains("AGENTS_SENTINEL"));
+
+        let group_prompt = zeroclaw_runtime::agent::system_prompt::build_system_prompt_with_mode_autonomy_and_memory(
+            &ws,
+            "test-model",
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            false,
+            zeroclaw_config::schema::SkillsPromptInjectionMode::Full,
+            false,
+            0,
+            false,
+        );
+
+        assert!(!group_prompt.contains("PRIVATE_MEMORY_SENTINEL_123"));
+        assert!(!group_prompt.contains("PRIVATE_PROJECT_SENTINEL_456"));
+        assert!(!group_prompt.contains("PRIVATE_PREF_SENTINEL_789"));
+        assert!(!group_prompt.contains("### MEMORY.md"));
+        assert!(group_prompt.contains("AGENTS_SENTINEL"));
+        assert!(group_prompt.contains("SOUL_SENTINEL"));
+        assert!(group_prompt.contains("USER_SENTINEL"));
     }
 
     #[tokio::test]
