@@ -1,0 +1,150 @@
+# Copyright (c) 2026 @Natfii. All rights reserved.
+
+name: Physical Acceptance APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Exact Git SHA, branch, or tag to build"
+        required: true
+        type: string
+
+concurrency:
+  group: physical-acceptance-${{ github.ref }}-${{ inputs.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-physical-apk:
+    name: Build Physical Acceptance APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Resolve canonical HEAD SHA
+        run: |
+          RESOLVED_SHA=$(git rev-parse HEAD)
+          if [ -z "$RESOLVED_SHA" ]; then
+            echo "::error::Failed to resolve exact HEAD SHA for ref '${{ inputs.ref }}'"
+            exit 1
+          fi
+          echo "RESOLVED_SHA=${RESOLVED_SHA}" >> $GITHUB_ENV
+          echo "Requested ref: ${{ inputs.ref }}"
+          echo "Resolved exact HEAD SHA: ${RESOLVED_SHA}"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, x86_64-linux-android
+
+      - name: Install cargo-ndk
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install NDK
+        run: sdkmanager "ndk;27.0.12077973"
+
+      - name: Cache Gradle & Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.cargo/registry
+            ~/.cargo/git
+            zeroclaw-android/target
+          key: ${{ runner.os }}-physical-apk-${{ hashFiles('zeroclaw-android/Cargo.lock', '**/*.gradle.kts') }}
+          restore-keys: ${{ runner.os }}-physical-apk-
+
+      - name: Install Zig
+        run: |
+          curl -sL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz | tar xJ
+          echo "$PWD/zig-x86_64-linux-0.15.2" >> $GITHUB_PATH
+
+      - name: Build libghostty-vt
+        run: bash scripts/build-ghostty.sh --clone
+
+      - name: Verify release signing credentials & decode keystore
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: |
+          MISSING_SECRETS=""
+          if [ -z "$RELEASE_KEYSTORE_BASE64" ]; then MISSING_SECRETS="$MISSING_SECRETS RELEASE_KEYSTORE_BASE64"; fi
+          if [ -z "$RELEASE_KEY_ALIAS" ]; then MISSING_SECRETS="$MISSING_SECRETS RELEASE_KEY_ALIAS"; fi
+          if [ -z "$RELEASE_STORE_PASSWORD" ]; then MISSING_SECRETS="$MISSING_SECRETS RELEASE_STORE_PASSWORD"; fi
+          if [ -z "$RELEASE_KEY_PASSWORD" ]; then MISSING_SECRETS="$MISSING_SECRETS RELEASE_KEY_PASSWORD"; fi
+
+          if [ -n "$MISSING_SECRETS" ]; then
+            echo "::error::Physical acceptance APK build requires configured release signing credentials. Missing secrets:$MISSING_SECRETS"
+            exit 1
+          fi
+
+          echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > ${{ github.workspace }}/release.keystore
+
+      - name: Build release APK
+        env:
+          ZEROAI_RELEASE_STORE_FILE: ${{ github.workspace }}/release.keystore
+          ZEROAI_RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          ZeroAI_StorePassword: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          ZeroAI_KeyPassword: ${{ secrets.RELEASE_KEY_PASSWORD }}
+        run: ./gradlew assembleRelease
+
+      - name: Assemble artifact and manifest
+        run: |
+          mkdir -p physical-acceptance
+          APK_PATH=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
+            echo "::error::Release APK output not found under app/build/outputs/apk/release/"
+            exit 1
+          fi
+
+          cp "$APK_PATH" physical-acceptance/zeroai-physical-acceptance.apk
+
+          APK_FILENAME=$(basename "$APK_PATH")
+          APK_SHA256=$(sha256sum "$APK_PATH" | awk '{print $1}')
+          UTC_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          cat <<EOF > physical-acceptance/manifest.txt
+          requested_ref: ${{ inputs.ref }}
+          resolved_sha: ${RESOLVED_SHA}
+          repository: ${{ github.repository }}
+          build_type: release
+          application_id: com.zeroclaw.android
+          version_name: 0.3.0
+          version_code: 300
+          apk_filename: ${APK_FILENAME}
+          apk_sha256: ${APK_SHA256}
+          abi_targets: arm64-v8a, x86_64
+          utc_build_timestamp: ${UTC_TIMESTAMP}
+          EOF
+
+          echo "=== Manifest Summary ==="
+          cat physical-acceptance/manifest.txt
+
+      - name: Upload Physical Acceptance Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zeroai-physical-${{ env.RESOLVED_SHA }}
+          path: physical-acceptance/
+          retention-days: 7
+          if-no-files-found: error

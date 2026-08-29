@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   RUST_BACKTRACE: 1
@@ -51,7 +51,22 @@ jobs:
         run: cargo fmt --check
 
       - name: Test
-        run: cargo test -p zeroclaw-ffi --lib -- --test-threads=1 2>/dev/null || echo "::warning::Rust host tests skipped (ghostty native symbols unavailable on CI host)"
+        run: |
+          LOG=$(mktemp)
+          if cargo test -p zeroclaw-ffi --lib -- --test-threads=1 >"$LOG" 2>&1; then
+            cat "$LOG"
+            rm -f "$LOG"
+          else
+            STATUS=$?
+            cat "$LOG"
+            if grep -q "undefined symbol: ghostty_" "$LOG"; then
+              echo "::warning::Rust host tests skipped (ghostty native symbols unavailable on CI host)"
+              rm -f "$LOG"
+            else
+              rm -f "$LOG"
+              exit $STATUS
+            fi
+          fi
 
       - name: Cargo Deny
         uses: EmbarkStudios/cargo-deny-action@v2
@@ -129,6 +144,8 @@ jobs:
     needs: [rust-lint-test, kotlin-lint, kotlin-test]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
