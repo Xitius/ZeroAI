@@ -79,7 +79,11 @@ jobs:
           echo "$PWD/zig-x86_64-linux-0.15.2" >> $GITHUB_PATH
 
       - name: Build libghostty-vt
-        run: bash scripts/build-ghostty.sh --clone
+        run: |
+          # The checkout leaves a gitlink placeholder without a usable submodule URL;
+          # build-ghostty.sh expects to clone Ghostty itself.
+          rm -rf zeroclaw-android/zeroclaw-ffi/vendor/ghostty-src
+          bash scripts/build-ghostty.sh --clone
 
       - name: Verify physical acceptance signing credentials & decode keystore
         env:
