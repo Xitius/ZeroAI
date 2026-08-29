@@ -81,32 +81,32 @@ jobs:
       - name: Build libghostty-vt
         run: bash scripts/build-ghostty.sh --clone
 
-      - name: Verify release signing credentials & decode keystore
+      - name: Verify physical acceptance signing credentials & decode keystore
         env:
-          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
-          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
-          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          PHYSICAL_ACCEPTANCE_KEYSTORE_BASE64: ${{ secrets.PHYSICAL_ACCEPTANCE_KEYSTORE_BASE64 }}
+          PHYSICAL_ACCEPTANCE_KEY_ALIAS: ${{ secrets.PHYSICAL_ACCEPTANCE_KEY_ALIAS }}
+          PHYSICAL_ACCEPTANCE_STORE_PASSWORD: ${{ secrets.PHYSICAL_ACCEPTANCE_STORE_PASSWORD }}
+          PHYSICAL_ACCEPTANCE_KEY_PASSWORD: ${{ secrets.PHYSICAL_ACCEPTANCE_KEY_PASSWORD }}
         run: |
           MISSING_SECRETS=""
-          if [ -z "$RELEASE_KEYSTORE_BASE64" ]; then MISSING_SECRETS="$MISSING_SECRETS RELEASE_KEYSTORE_BASE64"; fi
-          if [ -z "$RELEASE_KEY_ALIAS" ]; then MISSING_SECRETS="$MISSING_SECRETS RELEASE_KEY_ALIAS"; fi
-          if [ -z "$RELEASE_STORE_PASSWORD" ]; then MISSING_SECRETS="$MISSING_SECRETS RELEASE_STORE_PASSWORD"; fi
-          if [ -z "$RELEASE_KEY_PASSWORD" ]; then MISSING_SECRETS="$MISSING_SECRETS RELEASE_KEY_PASSWORD"; fi
+          if [ -z "$PHYSICAL_ACCEPTANCE_KEYSTORE_BASE64" ]; then MISSING_SECRETS="$MISSING_SECRETS PHYSICAL_ACCEPTANCE_KEYSTORE_BASE64"; fi
+          if [ -z "$PHYSICAL_ACCEPTANCE_KEY_ALIAS" ]; then MISSING_SECRETS="$MISSING_SECRETS PHYSICAL_ACCEPTANCE_KEY_ALIAS"; fi
+          if [ -z "$PHYSICAL_ACCEPTANCE_STORE_PASSWORD" ]; then MISSING_SECRETS="$MISSING_SECRETS PHYSICAL_ACCEPTANCE_STORE_PASSWORD"; fi
+          if [ -z "$PHYSICAL_ACCEPTANCE_KEY_PASSWORD" ]; then MISSING_SECRETS="$MISSING_SECRETS PHYSICAL_ACCEPTANCE_KEY_PASSWORD"; fi
 
           if [ -n "$MISSING_SECRETS" ]; then
-            echo "::error::Physical acceptance APK build requires configured release signing credentials. Missing secrets:$MISSING_SECRETS"
+            echo "::error::Physical acceptance APK build requires configured physical acceptance signing credentials. Missing secrets:$MISSING_SECRETS"
             exit 1
           fi
 
-          echo "$RELEASE_KEYSTORE_BASE64" | base64 -d > ${{ github.workspace }}/release.keystore
+          echo "$PHYSICAL_ACCEPTANCE_KEYSTORE_BASE64" | base64 -d > ${{ github.workspace }}/physical-acceptance.keystore
 
       - name: Build release APK
         env:
-          ZEROAI_RELEASE_STORE_FILE: ${{ github.workspace }}/release.keystore
-          ZEROAI_RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
-          ZeroAI_StorePassword: ${{ secrets.RELEASE_STORE_PASSWORD }}
-          ZeroAI_KeyPassword: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          ZEROAI_RELEASE_STORE_FILE: ${{ github.workspace }}/physical-acceptance.keystore
+          ZEROAI_RELEASE_KEY_ALIAS: ${{ secrets.PHYSICAL_ACCEPTANCE_KEY_ALIAS }}
+          ZeroAI_StorePassword: ${{ secrets.PHYSICAL_ACCEPTANCE_STORE_PASSWORD }}
+          ZeroAI_KeyPassword: ${{ secrets.PHYSICAL_ACCEPTANCE_KEY_PASSWORD }}
         run: ./gradlew assembleRelease
 
       - name: Assemble artifact and manifest
@@ -124,17 +124,41 @@ jobs:
           APK_SHA256=$(sha256sum "$APK_PATH" | awk '{print $1}')
           UTC_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
+          BUILD_TOOLS_DIR=$(ls -d $ANDROID_SDK_ROOT/build-tools/* 2>/dev/null | tail -n 1)
+          AAPT_BIN="${BUILD_TOOLS_DIR}/aapt"
+          APKSIGNER_BIN="${BUILD_TOOLS_DIR}/apksigner"
+
+          if [ -x "$AAPT_BIN" ]; then
+            BADGING=$("$AAPT_BIN" dump badging "$APK_PATH")
+            APP_ID=$(echo "$BADGING" | sed -n "s/.*package: name='\([^']*\)'.*/\1/p")
+            VERSION_CODE=$(echo "$BADGING" | sed -n "s/.*versionCode='\([^']*\)'.*/\1/p")
+            VERSION_NAME=$(echo "$BADGING" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
+          fi
+
+          if [ -z "$APP_ID" ]; then APP_ID="com.zeroclaw.android"; fi
+          if [ -z "$VERSION_CODE" ]; then VERSION_CODE="unknown"; fi
+          if [ -z "$VERSION_NAME" ]; then VERSION_NAME="unknown"; fi
+
+          if [ -x "$APKSIGNER_BIN" ]; then
+            SIGNING_CERT_SHA256=$("$APKSIGNER_BIN" verify --print-certs "$APK_PATH" | grep -i "SHA-256 digest:" | head -n 1 | awk '{print $NF}')
+          fi
+          if [ -z "$SIGNING_CERT_SHA256" ]; then SIGNING_CERT_SHA256="unknown"; fi
+
+          ABI_LIST=$(unzip -l "$APK_PATH" "lib/*" 2>/dev/null | awk '{print $4}' | cut -d'/' -f2 | sort -u | grep -v '^$' | paste -sd ", " -)
+          if [ -z "$ABI_LIST" ]; then ABI_LIST="unknown"; fi
+
           cat <<EOF > physical-acceptance/manifest.txt
           requested_ref: ${{ inputs.ref }}
           resolved_sha: ${RESOLVED_SHA}
           repository: ${{ github.repository }}
           build_type: release
-          application_id: com.zeroclaw.android
-          version_name: 0.3.0
-          version_code: 300
+          application_id: ${APP_ID}
+          version_name: ${VERSION_NAME}
+          version_code: ${VERSION_CODE}
           apk_filename: ${APK_FILENAME}
           apk_sha256: ${APK_SHA256}
-          abi_targets: arm64-v8a, x86_64
+          signing_cert_sha256: ${SIGNING_CERT_SHA256}
+          abi_targets: ${ABI_LIST}
           utc_build_timestamp: ${UTC_TIMESTAMP}
           EOF
 
