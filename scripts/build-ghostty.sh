@@ -30,19 +30,34 @@ GHOSTTY_REPO="https://github.com/ghostty-org/ghostty.git"
 GHOSTTY_COMMIT="efc0e4118a39f2d8364a02053b5a9a8e4118dcec"
 
 if [[ "${1:-}" == "--clone" ]]; then
-    if [ ! -d "$GHOSTTY_SRC" ]; then
-        echo "=== Cloning Ghostty ==="
-        git clone --depth 100 "$GHOSTTY_REPO" "$GHOSTTY_SRC"
+    GHOSTTY_ROOT=""
+    if [ -d "$GHOSTTY_SRC" ]; then
+        GHOSTTY_ROOT="$(git -C "$GHOSTTY_SRC" rev-parse --show-toplevel 2>/dev/null || true)"
     fi
-    cd "$GHOSTTY_SRC"
-    git fetch origin
-    git checkout "$GHOSTTY_COMMIT"
-    cd "$PROJECT_ROOT"
+    if [ "$GHOSTTY_ROOT" != "$GHOSTTY_SRC" ]; then
+        echo "=== Cloning Ghostty ==="
+        rm -rf "$GHOSTTY_SRC"
+        git clone --filter=blob:none --no-checkout "$GHOSTTY_REPO" "$GHOSTTY_SRC"
+    fi
+    GHOSTTY_ROOT="$(git -C "$GHOSTTY_SRC" rev-parse --show-toplevel)"
+    if [ "$GHOSTTY_ROOT" != "$GHOSTTY_SRC" ]; then
+        echo "ERROR: $GHOSTTY_SRC is not the root of its own Git repository."
+        exit 1
+    fi
+    git -C "$GHOSTTY_SRC" fetch --filter=blob:none origin "$GHOSTTY_COMMIT"
+    git -C "$GHOSTTY_SRC" checkout --detach "$GHOSTTY_COMMIT"
 fi
 
 if [ ! -d "$GHOSTTY_SRC" ]; then
     echo "ERROR: $GHOSTTY_SRC not found."
     echo "Run: ./scripts/build-ghostty.sh --clone"
+    exit 1
+fi
+
+# Prevent Git from walking upward into the parent ZeroAI repository.
+GHOSTTY_ROOT="$(git -C "$GHOSTTY_SRC" rev-parse --show-toplevel 2>/dev/null || true)"
+if [ "$GHOSTTY_ROOT" != "$GHOSTTY_SRC" ]; then
+    echo "ERROR: $GHOSTTY_SRC is not the root of its own Git repository."
     exit 1
 fi
 
