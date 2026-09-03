@@ -2161,10 +2161,15 @@ pub fn is_group_conversation(msg: &zeroclaw_api::channel::ChannelMessage) -> boo
 
     // 1. Explicit group prefixes or patterns
     if target.starts_with("group:")
+        || target.starts_with("group--")
         || target.starts_with("channel:")
+        || target.starts_with("channel--")
         || target.starts_with("room:")
+        || target.starts_with("room--")
         || target.starts_with("guild:")
+        || target.starts_with("guild--")
         || target.starts_with("chat:")
+        || target.starts_with("chat--")
         || target.starts_with('#')
         || target.starts_with('!') // Matrix room ID
         || target.contains("@g.us") // WhatsApp group JID
@@ -2205,8 +2210,11 @@ pub fn is_group_conversation(msg: &zeroclaw_api::channel::ChannelMessage) -> boo
         || target.eq_ignore_ascii_case("test")
         || target.eq_ignore_ascii_case("stdout")
         || target.starts_with("user:")
+        || target.starts_with("user--")
         || target.starts_with("dm:")
+        || target.starts_with("dm--")
         || target.starts_with("direct:")
+        || target.starts_with("direct--")
         || target.starts_with("ou_") // Lark user ID
         || target.ends_with("@s.whatsapp.net") // WhatsApp DM JID
     {
@@ -13715,7 +13723,9 @@ BTC is currently around $65,000 based on latest tool output."#
 
         // WeCom
         assert!(is_group_conversation(&make_msg("alice", "wr12345")));
+        assert!(is_group_conversation(&make_msg("alice", "group--wr12345")));
         assert!(!is_group_conversation(&make_msg("alice", "user:12345")));
+        assert!(!is_group_conversation(&make_msg("alice", "user--12345")));
 
         // Lark
         assert!(is_group_conversation(&make_msg("alice", "oc_12345")));

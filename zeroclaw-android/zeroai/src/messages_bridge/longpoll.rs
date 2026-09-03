@@ -27,10 +27,10 @@ use super::pblite;
 use super::proto::{authentication, client, rpc};
 
 /// Interval between keepalive pings sent to the server (15 minutes).
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(900);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_mins(15);
 
 /// Maximum delay between reconnection attempts (≈64 minutes).
-const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(3840);
+const MAX_RECONNECT_DELAY: Duration = Duration::from_mins(64);
 
 /// Base delay for the first reconnection attempt.
 const BASE_RECONNECT_DELAY: Duration = Duration::from_secs(1);

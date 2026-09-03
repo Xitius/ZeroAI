@@ -45,6 +45,7 @@ struct CliHandler {
 impl client::Handler for CliHandler {
     type Error = russh::Error;
 
+    #[allow(clippy::unused_async_trait_impl)]
     async fn check_server_key(
         &mut self,
         server_public_key: &russh::keys::PublicKey,
