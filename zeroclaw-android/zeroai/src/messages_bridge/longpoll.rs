@@ -27,10 +27,12 @@ use super::pblite;
 use super::proto::{authentication, client, rpc};
 
 /// Interval between keepalive pings sent to the server (15 minutes).
-const KEEPALIVE_INTERVAL: Duration = Duration::from_mins(15);
+#[allow(clippy::duration_suboptimal_units)]
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 /// Maximum delay between reconnection attempts (≈64 minutes).
-const MAX_RECONNECT_DELAY: Duration = Duration::from_mins(64);
+#[allow(clippy::duration_suboptimal_units)]
+const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(64 * 60);
 
 /// Base delay for the first reconnection attempt.
 const BASE_RECONNECT_DELAY: Duration = Duration::from_secs(1);
