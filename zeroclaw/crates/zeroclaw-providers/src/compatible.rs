@@ -268,7 +268,7 @@ impl OpenAiCompatibleModelProvider {
         Self {
             alias: alias.to_string(),
             name: name.to_string(),
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url: base_url.to_string(),
             credential: credential.map(ToString::to_string),
             auth_header: auth_style,
             supports_vision,
@@ -545,32 +545,52 @@ impl OpenAiCompatibleModelProvider {
         })
     }
 
-    /// Build the full URL for chat completions, detecting if base_url already includes the path.
-    /// This allows custom model_providers with non-standard endpoints (e.g., VolcEngine ARK uses
-    /// `/api/coding/v3/chat/completions` instead of `/v1/chat/completions`).
-    fn chat_completions_url(&self) -> String {
-        // If a custom api_path is configured, use it directly.
-        if let Some(ref api_path) = self.api_path {
-            let separator = if api_path.starts_with('/') { "" } else { "/" };
-            return format!("{}{separator}{api_path}", self.base_url);
+    /// Helper to append a path suffix structurally onto base_url using reqwest::Url,
+    /// preserving scheme, host, port, path prefix, query parameters, and fragments.
+    fn append_path_suffix(&self, suffix: &str) -> String {
+        let mut clean_suffix = suffix.trim_start_matches('/');
+        let Ok(mut url) = reqwest::Url::parse(&self.base_url) else {
+            let base = self.base_url.trim_end_matches('/');
+            if base.ends_with(clean_suffix) {
+                return self.base_url.clone();
+            }
+            return format!("{base}/{clean_suffix}");
+        };
+
+        let mut current_path = url.path().trim_end_matches('/');
+        if clean_suffix == "models" && current_path.ends_with("/chat/completions") {
+            current_path = current_path.strip_suffix("/chat/completions").unwrap_or(current_path);
         }
 
-        let has_full_endpoint = reqwest::Url::parse(&self.base_url)
-            .map(|url| {
-                url.path()
-                    .trim_end_matches('/')
-                    .ends_with("/chat/completions")
-            })
-            .unwrap_or_else(|_| {
-                self.base_url
-                    .trim_end_matches('/')
-                    .ends_with("/chat/completions")
-            });
+        if (current_path.ends_with("/v1") || current_path == "/v1") && clean_suffix.starts_with("v1/") {
+            clean_suffix = clean_suffix.strip_prefix("v1/").unwrap_or(clean_suffix);
+        }
 
-        if has_full_endpoint {
-            self.base_url.clone()
+        if !current_path.ends_with(clean_suffix) {
+            let target_path = if current_path.is_empty() || current_path == "/" {
+                format!("/{clean_suffix}")
+            } else {
+                format!("{current_path}/{clean_suffix}")
+            };
+            url.set_path(&target_path);
+        }
+
+        url.to_string()
+    }
+
+    /// Build the full URL for model listing, preserving base path prefixes, query parameters, and fragments.
+    fn models_url(&self) -> String {
+        self.append_path_suffix("models")
+    }
+
+    /// Build the full URL for chat completions, detecting if base_url already includes the path.
+    /// Uses structural reqwest::Url path operations to preserve query parameters, fragments,
+    /// and host/port components while preventing path duplication or query syntax corruption.
+    fn chat_completions_url(&self) -> String {
+        if let Some(ref api_path) = self.api_path {
+            self.append_path_suffix(api_path)
         } else {
-            format!("{}/chat/completions", self.base_url)
+            self.append_path_suffix("chat/completions")
         }
     }
 
@@ -1994,7 +2014,7 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
         // path without an Authorization header.
         let list_credential = self.credential.as_deref();
         if list_credential.is_some() || self.unauthenticated_model_listing {
-            let url = format!("{}/models", self.base_url);
+            let url = self.models_url();
             let response = self
                 .apply_auth_header(self.http_client().get(&url), list_credential)
                 .send()
@@ -2925,9 +2945,9 @@ mod tests {
     }
 
     #[test]
-    fn strips_trailing_slash() {
+    fn preserves_raw_base_url() {
         let p = make_model_provider("test", "https://example.com/", None);
-        assert_eq!(p.base_url, "https://example.com");
+        assert_eq!(p.base_url, "https://example.com/");
     }
 
     #[tokio::test]
@@ -3269,6 +3289,40 @@ mod tests {
         assert_eq!(
             p.chat_completions_url(),
             "https://api.example.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn chat_completions_url_structural_query_and_fragment_preservation() {
+        let p1 = make_model_provider("test", "https://host/v1?token=abc/", None);
+        assert_eq!(
+            p1.chat_completions_url(),
+            "https://host/v1/chat/completions?token=abc/"
+        );
+
+        let p2 = make_model_provider("test", "https://host/v1?token=abc/#frag/", None);
+        assert_eq!(
+            p2.chat_completions_url(),
+            "https://host/v1/chat/completions?token=abc/#frag/"
+        );
+
+        let p3 = make_model_provider("test", "https://host/proxy/api?token=abc/", None);
+        assert_eq!(
+            p3.chat_completions_url(),
+            "https://host/proxy/api/chat/completions?token=abc/"
+        );
+
+        let p4 = make_model_provider("test", "https://host/v1/chat/completions?token=abc/", None);
+        assert_eq!(
+            p4.chat_completions_url(),
+            "https://host/v1/chat/completions?token=abc/"
+        );
+
+        let p5 = make_model_provider("test", "https://host/v1?token=abc/#frag/", None)
+            .with_api_path(Some("/custom/completions".to_string()));
+        assert_eq!(
+            p5.chat_completions_url(),
+            "https://host/v1/custom/completions?token=abc/#frag/"
         );
     }
 

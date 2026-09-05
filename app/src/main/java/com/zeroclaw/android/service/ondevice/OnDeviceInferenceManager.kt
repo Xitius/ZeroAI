@@ -96,7 +96,7 @@ sealed interface OnDeviceInferenceState {
  *   application's `applicationScope`).
  */
 class OnDeviceInferenceManager(
-    context: Context,
+    private val context: Context,
     private val agentRepository: AgentRepository,
     private val scope: CoroutineScope,
 ) {
@@ -679,6 +679,13 @@ class OnDeviceInferenceManager(
             TAG,
             "Loading LiteRT-LM model ${model.id} (GPU, ${model.contextTokens} tokens) path=$path",
         )
+        val gpuCacheDir = java.io.File(context.cacheDir, "litert_gpu_cache").apply { mkdirs() }
+        val cacheDirArg =
+            if (gpuCacheDir.isDirectory && gpuCacheDir.canWrite()) {
+                gpuCacheDir.absolutePath
+            } else {
+                ":nocache"
+            }
         val result =
             withContext(engineDispatcher) {
                 inference.load(
@@ -690,6 +697,7 @@ class OnDeviceInferenceManager(
                     // EngineReadiness.Failed) instead of a silent,
                     // unusably-slow CPU degrade.
                     backend = Backend.GPU(),
+                    cacheDir = cacheDirArg,
                     maxNumTokens = model.contextTokens,
                 )
             }

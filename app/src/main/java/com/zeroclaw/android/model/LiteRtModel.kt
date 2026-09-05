@@ -91,8 +91,8 @@ object LiteRtModelCatalog {
         LiteRtModel(
             id = "gemma-4-e2b-it",
             displayName = "Gemma 4 E2B-it (QAT)",
-            variantNote = "2B params · 32K context · mixed 2/4/8-bit QAT",
-            contextTokens = 32_000,
+            variantNote = "2B params · 4K context · mixed 2/4/8-bit QAT",
+            contextTokens = 4096,
             fileBytes = 2_588_147_712L,
             workingMemoryBytes = 1_200_000_000L,
             downloadUrl =
@@ -110,16 +110,14 @@ object LiteRtModelCatalog {
      * Runs on the GPU backend like E2B. The [contextTokens] budget is
      * capped below the architecture's native 32K on purpose: the KV
      * cache scales with the token budget, and trimming it keeps the
-     * GPU working-memory peak comfortable on Tensor G5. 24K is the
-     * starting point now that the agent's baseline context overhead
-     * has been reduced — raise or lower it from real device traces.
+     * GPU working-memory peak comfortable on Tensor G5.
      */
     val Gemma4E4B: LiteRtModel =
         LiteRtModel(
             id = "gemma-4-e4b-it",
             displayName = "Gemma 4 E4B-it",
-            variantNote = "4B params · 24K context · higher quality",
-            contextTokens = 24_000,
+            variantNote = "4B params · 4K context · higher quality",
+            contextTokens = 4096,
             fileBytes = 3_659_530_240L,
             workingMemoryBytes = 1_800_000_000L,
             downloadUrl =

@@ -123,7 +123,7 @@ object ProviderValidator {
         val count = models.size
         val noun = if (count == 1) "model" else "models"
         return ValidationResult.Success(
-            details = "Connected \u2014 $count $noun available",
+            details = "Reachable \u2014 $count $noun listed",
         )
     }
 

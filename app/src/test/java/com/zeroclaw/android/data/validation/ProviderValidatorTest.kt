@@ -40,7 +40,7 @@ class ProviderValidatorTest {
                 )
             assertTrue(result is ValidationResult.Success)
             val success = result as ValidationResult.Success
-            assertTrue("2" in success.details)
+            assertEquals("Reachable \u2014 2 models listed", success.details)
         }
 
         @Test

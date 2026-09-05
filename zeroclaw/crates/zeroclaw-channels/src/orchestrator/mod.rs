@@ -212,6 +212,7 @@ const AUTOSAVE_MIN_MESSAGE_CHARS: usize = 20;
 pub use zeroclaw_runtime::agent::system_prompt::{
     BOOTSTRAP_MAX_CHARS, build_system_prompt, build_system_prompt_with_mode,
     build_system_prompt_with_mode_and_autonomy,
+    build_system_prompt_with_mode_autonomy_and_memory,
 };
 
 const DEFAULT_CHANNEL_INITIAL_BACKOFF_SECS: u64 = 2;
@@ -374,6 +375,7 @@ struct ChannelRuntimeContext {
     tools_registry: Arc<Vec<Box<dyn Tool>>>,
     observer: Arc<dyn Observer>,
     system_prompt: Arc<String>,
+    group_system_prompt: Arc<String>,
     model: Arc<String>,
     temperature: Option<f64>,
     auto_save_memory: bool,
@@ -1256,7 +1258,10 @@ fn replace_available_skills_section(base_prompt: &str, refreshed_skills: &str) -
     format!("{base_prompt}\n\n{refreshed_skills}")
 }
 
-fn refreshed_new_session_system_prompt(ctx: &ChannelRuntimeContext) -> String {
+fn refreshed_new_session_system_prompt_for_scope(
+    ctx: &ChannelRuntimeContext,
+    is_group: bool,
+) -> String {
     let refreshed_skills = zeroclaw_runtime::skills::skills_to_prompt_with_mode(
         &zeroclaw_runtime::skills::load_skills_with_config(
             ctx.workspace_dir.as_ref(),
@@ -1265,7 +1270,17 @@ fn refreshed_new_session_system_prompt(ctx: &ChannelRuntimeContext) -> String {
         ctx.workspace_dir.as_ref(),
         ctx.prompt_config.skills.prompt_injection_mode,
     );
-    replace_available_skills_section(ctx.system_prompt.as_str(), &refreshed_skills)
+    let base = if is_group {
+        ctx.group_system_prompt.as_str()
+    } else {
+        ctx.system_prompt.as_str()
+    };
+    replace_available_skills_section(base, &refreshed_skills)
+}
+
+#[allow(dead_code)]
+fn refreshed_new_session_system_prompt(ctx: &ChannelRuntimeContext) -> String {
+    refreshed_new_session_system_prompt_for_scope(ctx, false)
 }
 
 fn compact_sender_history(ctx: &ChannelRuntimeContext, sender_key: &str) -> bool {
@@ -2141,8 +2156,109 @@ fn format_memory_context(
     context
 }
 
-fn is_group_reply_target(reply_target: &str) -> bool {
-    reply_target.contains("@g.us") || reply_target.starts_with("group:")
+pub fn is_group_conversation(msg: &zeroclaw_api::channel::ChannelMessage) -> bool {
+    let target = msg.reply_target.trim();
+
+    // 1. Explicit group prefixes or patterns
+    if target.starts_with("group:")
+        || target.starts_with("group--")
+        || target.starts_with("channel:")
+        || target.starts_with("channel--")
+        || target.starts_with("room:")
+        || target.starts_with("room--")
+        || target.starts_with("guild:")
+        || target.starts_with("guild--")
+        || target.starts_with("chat:")
+        || target.starts_with("chat--")
+        || target.starts_with('#')
+        || target.starts_with('!') // Matrix room ID
+        || target.contains("@g.us") // WhatsApp group JID
+        || target.starts_with("oc_") // Lark group chat ID
+        || target.starts_with("wr") // WeCom group chat ID
+    {
+        return true;
+    }
+
+    // Telegram group / supergroup IDs are negative numbers (e.g. -100123456789)
+    if target.starts_with('-') && target[1..].chars().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
+
+    // Slack channel or private group IDs (e.g. C0123456, G0123456)
+    if (target.starts_with('C') || target.starts_with('G'))
+        && target.len() >= 8
+        && target.chars().skip(1).all(|c| c.is_ascii_alphanumeric())
+    {
+        return true;
+    }
+
+    let lower_target = target.to_ascii_lowercase();
+    if lower_target.contains("group")
+        || lower_target.contains("channel")
+        || lower_target.contains("room")
+        || lower_target.contains("shared")
+    {
+        return true;
+    }
+
+    // 2. Explicit direct message (DM) patterns
+    if target.eq_ignore_ascii_case("user")
+        || target.eq_ignore_ascii_case("cli")
+        || target.eq_ignore_ascii_case("webhook")
+        || target.eq_ignore_ascii_case("acp")
+        || target.eq_ignore_ascii_case("default")
+        || target.eq_ignore_ascii_case("test")
+        || target.eq_ignore_ascii_case("stdout")
+        || target.starts_with("user:")
+        || target.starts_with("user--")
+        || target.starts_with("dm:")
+        || target.starts_with("dm--")
+        || target.starts_with("direct:")
+        || target.starts_with("direct--")
+        || target.starts_with("ou_") // Lark user ID
+        || target.ends_with("@s.whatsapp.net") // WhatsApp DM JID
+    {
+        return false;
+    }
+
+    // Slack DM ID (starts with D, e.g. D01234567)
+    if target.starts_with('D')
+        && target.len() >= 8
+        && target.chars().skip(1).all(|c| c.is_ascii_alphanumeric())
+    {
+        return false;
+    }
+
+    // Phone numbers (E.164 e.g. +1234567890)
+    if target.starts_with('+') && target[1..].chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+
+    // Positive Telegram DM chat ID (all digits)
+    if !target.is_empty() && target.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+
+    // Target matches sender (1-on-1 DM where reply_target is sender's ID/handle)
+    if !msg.sender.is_empty()
+        && (target.eq_ignore_ascii_case(&msg.sender)
+            || sanitize_session_key(target) == sanitize_session_key(&msg.sender))
+    {
+        return false;
+    }
+
+    // Matrix user handle (@user:domain)
+    if target.starts_with('@') && target.contains(':') && !target.contains("@g.us") {
+        return false;
+    }
+
+    // UUID (e.g. Signal user ID)
+    if uuid::Uuid::parse_str(target).is_ok() {
+        return false;
+    }
+
+    // 3. Ambiguous/unknown classification -> FAIL CLOSED for private memory (treat as group)
+    true
 }
 
 fn sender_memory_session_ids(
@@ -2151,7 +2267,7 @@ fn sender_memory_session_ids(
 ) -> Vec<String> {
     // Match the sanitized form persisted by memory backend migrations.
     let sanitized_sender = sanitize_session_key(&msg.sender);
-    if is_group_reply_target(&msg.reply_target) {
+    if is_group_conversation(msg) {
         vec![sanitized_sender]
     } else {
         vec![history_key.to_string(), sanitized_sender]
@@ -3470,7 +3586,7 @@ async fn process_channel_message_body(
     // Always recall before each LLM call (not just first turn).
     // For group chats: merge sender-scope + group-scope memories.
     // For DMs: recall from the current conversation scope plus sender scope.
-    let is_group_chat = is_group_reply_target(&msg.reply_target);
+    let is_group_chat = is_group_conversation(&msg);
 
     let mem_recall_start = Instant::now();
     let sender_session_ids = sender_memory_session_ids(&msg, &history_key);
@@ -3492,7 +3608,7 @@ async fn process_channel_message_body(
             ctx.min_relevance_score,
             Some(&history_key),
         );
-        tokio::join!(sender_memory_fut, group_memory_fut)
+        (String::new(), group_memory_fut.await)
     } else {
         (sender_memory_fut.await, String::new())
     };
@@ -3501,7 +3617,9 @@ async fn process_channel_message_body(
     ::zeroclaw_log::record!(INFO, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Note).with_attrs(::serde_json::json!({"mem_recall_ms": mem_recall_ms, "sender_empty": sender_memory.is_empty(), "group_empty": group_memory.is_empty()})), "memory recall completed");
 
     // Merge sender and group memory context blocks.
-    let memory_context = if group_memory.is_empty() {
+    let memory_context = if is_group_chat {
+        group_memory
+    } else if group_memory.is_empty() {
         sender_memory
     } else if sender_memory.is_empty() {
         group_memory
@@ -3512,10 +3630,15 @@ async fn process_channel_message_body(
     // Use refreshed system prompt for new sessions (master's /new support),
     // and inject memory into system prompt (not user message) so it
     // doesn't pollute session history and is re-fetched each turn.
+    // For group chats, use group_system_prompt which structurally excludes MEMORY.md at construction time.
     let base_system_prompt = if had_prior_history {
-        ctx.system_prompt.as_str().to_string()
+        if is_group_chat {
+            ctx.group_system_prompt.as_str().to_string()
+        } else {
+            ctx.system_prompt.as_str().to_string()
+        }
     } else {
-        refreshed_new_session_system_prompt(ctx.as_ref())
+        refreshed_new_session_system_prompt_for_scope(ctx.as_ref(), is_group_chat)
     };
     let mut system_prompt =
         build_channel_system_prompt_for_message(&base_system_prompt, &msg, target_channel.as_ref());
@@ -7583,7 +7706,7 @@ pub async fn start_channels(
             &mut tool_descs,
             &mut deferred_section,
         );
-        let mut system_prompt = build_system_prompt_with_mode_and_autonomy(
+        let mut system_prompt = build_system_prompt_with_mode_autonomy_and_memory(
             &workspace,
             &model,
             &tool_descs,
@@ -7595,25 +7718,44 @@ pub async fn start_channels(
             config.skills.prompt_injection_mode,
             agent.compact_context,
             agent.max_system_prompt_chars,
+            true,
+        );
+        let mut group_system_prompt = build_system_prompt_with_mode_autonomy_and_memory(
+            &workspace,
+            &model,
+            &tool_descs,
+            &skills,
+            Some(&agent.identity),
+            bootstrap_max_chars,
+            Some(&risk_profile),
+            native_tools,
+            config.skills.prompt_injection_mode,
+            agent.compact_context,
+            agent.max_system_prompt_chars,
+            false,
         );
         if expose_text_tool_protocol {
-            system_prompt.push_str(&build_tool_instructions_for_names(
+            let tool_instr = build_tool_instructions_for_names(
                 tools_registry.as_ref(),
                 &effective_tool_names,
-            ));
+            );
+            system_prompt.push_str(&tool_instr);
+            group_system_prompt.push_str(&tool_instr);
         }
         if !deferred_section.is_empty() {
             system_prompt.push('\n');
             system_prompt.push_str(&deferred_section);
+            group_system_prompt.push('\n');
+            group_system_prompt.push_str(&deferred_section);
         }
         if agent.tool_receipts.enabled && agent.tool_receipts.inject_system_prompt {
-            system_prompt.push_str(
-                "\n## Tool Execution Receipts\n\n\
+            let receipt_instr = "\n## Tool Execution Receipts\n\n\
                  Every tool result includes a `[receipt: ...]` field. This is a cryptographic \
                  signature proving the tool actually executed. You must include the receipt \
                  verbatim when referencing tool results. Do not modify, omit, or fabricate receipts. \
-                 A missing or invalid receipt indicates a fabricated tool call.\n\n",
-            );
+                 A missing or invalid receipt indicates a fabricated tool call.\n\n";
+            system_prompt.push_str(receipt_instr);
+            group_system_prompt.push_str(receipt_instr);
         }
 
         // === First iteration only: set up shared channel infrastructure ===
@@ -7823,6 +7965,7 @@ pub async fn start_channels(
             tools_registry: Arc::clone(&tools_registry),
             observer: Arc::clone(&observer),
             system_prompt: Arc::new(system_prompt),
+            group_system_prompt: Arc::new(group_system_prompt),
             model: Arc::new(model.clone()),
             temperature,
             auto_save_memory: config.memory.auto_save,
@@ -8617,6 +8760,7 @@ mod tests {
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new(String::new()),
+            group_system_prompt: Arc::new(String::new()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -9188,6 +9332,7 @@ mod tests {
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("system".to_string()),
+            group_system_prompt: Arc::new("system".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -9318,6 +9463,7 @@ mod tests {
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("system".to_string()),
+            group_system_prompt: Arc::new("system".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -9409,6 +9555,7 @@ mod tests {
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("system".to_string()),
+            group_system_prompt: Arc::new("system".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -9516,6 +9663,7 @@ mod tests {
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("system".to_string()),
+            group_system_prompt: Arc::new("system".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -10312,6 +10460,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![Box::new(MockPriceTool)]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -10416,6 +10565,7 @@ BTC is currently around $65,000 based on latest tool output."#
             )]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -10521,6 +10671,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![Box::new(MockPriceTool)]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -10665,6 +10816,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![Box::new(MockPriceTool)]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -10780,6 +10932,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![Box::new(MockPriceTool)]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -10910,6 +11063,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![Box::new(MockPriceTool)]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -11023,6 +11177,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![Box::new(MockPriceTool)]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -11121,6 +11276,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![Box::new(MockPriceTool)]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -11232,6 +11388,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("default-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -11369,6 +11526,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("default-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -11487,6 +11645,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("default-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -11593,6 +11752,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![Box::new(MockPriceTool)]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -11696,6 +11856,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![Box::new(MockPriceTool)]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -12005,6 +12166,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -12127,6 +12289,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -12268,6 +12431,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -12406,6 +12570,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -12522,6 +12687,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -12620,6 +12786,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -13515,6 +13682,116 @@ BTC is currently around $65,000 based on latest tool output."#
         assert!(recalled.iter().any(|entry| entry.content.contains("45")));
     }
 
+    #[test]
+    fn test_is_group_conversation_classification_matrix() {
+        let make_msg = |sender: &str, reply_target: &str| zeroclaw_api::channel::ChannelMessage {
+            id: "1".into(),
+            sender: sender.into(),
+            reply_target: reply_target.into(),
+            content: "hi".into(),
+            channel: "test".into(),
+            channel_alias: None,
+            timestamp: 0,
+            thread_ts: None,
+            interruption_scope_id: None,
+            attachments: vec![],
+        };
+
+        // WhatsApp
+        assert!(is_group_conversation(&make_msg("alice", "1234567890@g.us")));
+        assert!(!is_group_conversation(&make_msg("alice", "1234567890@s.whatsapp.net")));
+        assert!(!is_group_conversation(&make_msg("alice", "+1234567890")));
+
+        // Telegram
+        assert!(is_group_conversation(&make_msg("alice", "-100123456789")));
+        assert!(!is_group_conversation(&make_msg("alice", "123456789")));
+
+        // Slack
+        assert!(is_group_conversation(&make_msg("alice", "C01234567")));
+        assert!(is_group_conversation(&make_msg("alice", "G01234567")));
+        assert!(is_group_conversation(&make_msg("alice", "#general")));
+        assert!(!is_group_conversation(&make_msg("alice", "D01234567")));
+
+        // Matrix
+        assert!(is_group_conversation(&make_msg("alice", "!roomid:matrix.org")));
+        assert!(!is_group_conversation(&make_msg("alice", "@user:matrix.org")));
+
+        // Signal
+        assert!(is_group_conversation(&make_msg("alice", "group:xyz")));
+        assert!(!is_group_conversation(&make_msg("alice", "+15551234567")));
+        assert!(!is_group_conversation(&make_msg("alice", "123e4567-e89b-12d3-a456-426614174000")));
+
+        // WeCom
+        assert!(is_group_conversation(&make_msg("alice", "wr12345")));
+        assert!(is_group_conversation(&make_msg("alice", "group--wr12345")));
+        assert!(!is_group_conversation(&make_msg("alice", "user:12345")));
+        assert!(!is_group_conversation(&make_msg("alice", "user--12345")));
+
+        // Lark
+        assert!(is_group_conversation(&make_msg("alice", "oc_12345")));
+        assert!(!is_group_conversation(&make_msg("alice", "ou_12345")));
+
+        // CLI / Local
+        assert!(!is_group_conversation(&make_msg("alice", "user")));
+
+        // Direct message where target matches sender name
+        assert!(!is_group_conversation(&make_msg("alice", "alice")));
+
+        // Ambiguous / unknown classification fails closed -> treats as group chat
+        assert!(is_group_conversation(&make_msg("alice", "unknown_target_xyz")));
+    }
+
+    #[test]
+    fn test_workspace_fixture_privacy_boundary_direct_vs_group() {
+        let tmp = TempDir::new().unwrap();
+        let ws = tmp.path();
+
+        std::fs::write(ws.join("AGENTS.md"), "AGENTS_SENTINEL").unwrap();
+        std::fs::write(ws.join("SOUL.md"), "SOUL_SENTINEL").unwrap();
+        std::fs::write(ws.join("USER.md"), "USER_SENTINEL").unwrap();
+        std::fs::write(ws.join("MEMORY.md"), "PRIVATE_MEMORY_SENTINEL").unwrap();
+
+        let direct_prompt = build_system_prompt_with_mode_autonomy_and_memory(
+            ws,
+            "test-model",
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            false,
+            zeroclaw_config::schema::SkillsPromptInjectionMode::Full,
+            false,
+            8000,
+            true,
+        );
+
+        assert!(direct_prompt.contains("AGENTS_SENTINEL"));
+        assert!(direct_prompt.contains("SOUL_SENTINEL"));
+        assert!(direct_prompt.contains("USER_SENTINEL"));
+        assert!(direct_prompt.contains("PRIVATE_MEMORY_SENTINEL"));
+
+        let group_prompt = build_system_prompt_with_mode_autonomy_and_memory(
+            ws,
+            "test-model",
+            &[],
+            &[],
+            None,
+            None,
+            None,
+            false,
+            zeroclaw_config::schema::SkillsPromptInjectionMode::Full,
+            false,
+            8000,
+            false,
+        );
+
+        assert!(group_prompt.contains("AGENTS_SENTINEL"));
+        assert!(group_prompt.contains("SOUL_SENTINEL"));
+        assert!(group_prompt.contains("USER_SENTINEL"));
+        assert!(!group_prompt.contains("PRIVATE_MEMORY_SENTINEL"));
+    }
+
     #[tokio::test]
     async fn build_memory_context_includes_recalled_entries() {
         let tmp = TempDir::new().unwrap();
@@ -13535,7 +13812,7 @@ BTC is currently around $65,000 based on latest tool output."#
         let msg = zeroclaw_api::channel::ChannelMessage {
             id: "msg_1".into(),
             sender: "U123".into(),
-            reply_target: "C456".into(),
+            reply_target: "D12345678".into(),
             content: "Project codename is quartz".into(),
             channel: "slack".into(),
             channel_alias: None,
@@ -13743,6 +14020,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -13897,7 +14175,8 @@ BTC is currently around $65,000 based on latest tool output."#
             memory: Arc::new(NoopMemory),
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
-            system_prompt: Arc::new(initial_system_prompt),
+            system_prompt: Arc::new(initial_system_prompt.clone()),
+            group_system_prompt: Arc::new(initial_system_prompt),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -14094,6 +14373,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -14221,6 +14501,7 @@ BTC is currently around $65,000 based on latest tool output."#
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -15132,6 +15413,7 @@ This is an example JSON object for profile settings."#;
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("You are a helpful assistant.".to_string()),
+            group_system_prompt: Arc::new("You are a helpful assistant.".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -15237,6 +15519,7 @@ This is an example JSON object for profile settings."#;
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("You are a helpful assistant.".to_string()),
+            group_system_prompt: Arc::new("You are a helpful assistant.".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -15377,6 +15660,7 @@ This is an example JSON object for profile settings."#;
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("You are a helpful assistant.".to_string()),
+            group_system_prompt: Arc::new("You are a helpful assistant.".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -15565,6 +15849,7 @@ This is an example JSON object for profile settings."#;
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("default-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -15705,6 +15990,7 @@ This is an example JSON object for profile settings."#;
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("default-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -15837,6 +16123,7 @@ This is an example JSON object for profile settings."#;
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("default-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -15989,6 +16276,7 @@ This is an example JSON object for profile settings."#;
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("default-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,
@@ -16339,6 +16627,7 @@ This is an example JSON object for profile settings."#;
             tools_registry: Arc::new(vec![]),
             observer: Arc::new(NoopObserver),
             system_prompt: Arc::new("test-system-prompt".to_string()),
+            group_system_prompt: Arc::new("test-group-prompt".to_string()),
             model: Arc::new("test-model".to_string()),
             temperature: Some(0.0),
             auto_save_memory: false,

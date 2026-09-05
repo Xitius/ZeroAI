@@ -185,9 +185,10 @@ impl BugleHttpClient {
     /// # Errors
     ///
     /// Returns [`reqwest::Error`] if the underlying TLS backend fails to initialise.
+    #[allow(clippy::duration_suboptimal_units)]
     pub fn new_long_poll() -> Result<Self, reqwest::Error> {
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(1800))
+            .timeout(Duration::from_secs(30 * 60))
             .default_headers(bugle_headers())
             .build()?;
         Ok(Self { client })
