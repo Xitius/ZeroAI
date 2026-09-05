@@ -545,46 +545,53 @@ impl OpenAiCompatibleModelProvider {
         })
     }
 
-    /// Build the full URL for chat completions, detecting if base_url already includes the path.
-    /// Uses structural reqwest::Url path operations to preserve query parameters, fragments,
-    /// and host/port components while preventing path duplication or query syntax corruption.
-    fn chat_completions_url(&self) -> String {
+    /// Helper to append a path suffix structurally onto base_url using reqwest::Url,
+    /// preserving scheme, host, port, path prefix, query parameters, and fragments.
+    fn append_path_suffix(&self, suffix: &str) -> String {
+        let mut clean_suffix = suffix.trim_start_matches('/');
         let Ok(mut url) = reqwest::Url::parse(&self.base_url) else {
-            // Textual fallback for invalid/non-parseable base URLs
-            if let Some(ref api_path) = self.api_path {
-                let separator = if api_path.starts_with('/') { "" } else { "/" };
-                return format!("{}{separator}{api_path}", self.base_url);
-            }
-            if self.base_url.trim_end_matches('/').ends_with("/chat/completions") {
+            let base = self.base_url.trim_end_matches('/');
+            if base.ends_with(clean_suffix) {
                 return self.base_url.clone();
             }
-            return format!("{}/chat/completions", self.base_url);
+            return format!("{base}/{clean_suffix}");
         };
 
-        if let Some(ref api_path) = self.api_path {
-            let current_path = url.path().trim_end_matches('/');
-            let target_path = if api_path.starts_with('/') {
-                api_path.clone()
-            } else if current_path.is_empty() || current_path == "/" {
-                format!("/{api_path}")
-            } else {
-                format!("{current_path}/{api_path}")
-            };
-            url.set_path(&target_path);
-            return url.to_string();
+        let mut current_path = url.path().trim_end_matches('/');
+        if clean_suffix == "models" && current_path.ends_with("/chat/completions") {
+            current_path = current_path.strip_suffix("/chat/completions").unwrap_or(current_path);
         }
 
-        let current_path = url.path().trim_end_matches('/');
-        if !current_path.ends_with("/chat/completions") {
+        if (current_path.ends_with("/v1") || current_path == "/v1") && clean_suffix.starts_with("v1/") {
+            clean_suffix = clean_suffix.strip_prefix("v1/").unwrap_or(clean_suffix);
+        }
+
+        if !current_path.ends_with(clean_suffix) {
             let target_path = if current_path.is_empty() || current_path == "/" {
-                "/chat/completions".to_string()
+                format!("/{clean_suffix}")
             } else {
-                format!("{current_path}/chat/completions")
+                format!("{current_path}/{clean_suffix}")
             };
             url.set_path(&target_path);
         }
 
         url.to_string()
+    }
+
+    /// Build the full URL for model listing, preserving base path prefixes, query parameters, and fragments.
+    fn models_url(&self) -> String {
+        self.append_path_suffix("models")
+    }
+
+    /// Build the full URL for chat completions, detecting if base_url already includes the path.
+    /// Uses structural reqwest::Url path operations to preserve query parameters, fragments,
+    /// and host/port components while preventing path duplication or query syntax corruption.
+    fn chat_completions_url(&self) -> String {
+        if let Some(ref api_path) = self.api_path {
+            self.append_path_suffix(api_path)
+        } else {
+            self.append_path_suffix("chat/completions")
+        }
     }
 
     fn requires_tool_stream(&self) -> bool {
@@ -2007,7 +2014,7 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
         // path without an Authorization header.
         let list_credential = self.credential.as_deref();
         if list_credential.is_some() || self.unauthenticated_model_listing {
-            let url = format!("{}/models", self.base_url);
+            let url = self.models_url();
             let response = self
                 .apply_auth_header(self.http_client().get(&url), list_credential)
                 .send()
@@ -3315,7 +3322,7 @@ mod tests {
             .with_api_path(Some("/custom/completions".to_string()));
         assert_eq!(
             p5.chat_completions_url(),
-            "https://host/custom/completions?token=abc/#frag/"
+            "https://host/v1/custom/completions?token=abc/#frag/"
         );
     }
 
